@@ -39,3 +39,7 @@ https://thehumanworks.github.io/age-inbox/#to=<age1>&c=<urlsafe-base64>
 ```
 
 `c` is one age file, or an AIP1 pack of them. Invite has `to` only.
+
+## Next (store-backed)
+
+Phase 1 spec for agents: [spec/README.md](spec/README.md).
