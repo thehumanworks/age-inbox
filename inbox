@@ -12,9 +12,9 @@ Nothing about the vault is put in the URL except ciphertext.
 
   inbox init
   inbox invite
-  inbox seal [--url URL]     # vault on stdin; appends if URL has c=
+  inbox seal [--url URL]     # vault on stdin; one ciphertext, replaces c=
   inbox open URL
-  inbox compact URL          # needs identity; prints a shorter URL
+  inbox compact URL          # flatten an old packed URL into one vault
   inbox to URL
 """
 
@@ -297,21 +297,15 @@ def cmd_invite(args: argparse.Namespace) -> int:
 
 def cmd_seal(args: argparse.Namespace) -> int:
     require_tools(need_zstd=True)
-    existing = b""
     if args.url:
-        parsed = parse_url(args.url)
-        to = parsed["to"]
-        if parsed.get("c"):
-            existing = b64url_decode(parsed["c"])
+        to = parse_url(args.url)["to"]
     else:
         to = args.to or recipient_from_identity(identity_path())
     plaintext = sys.stdin.buffer.read()
     if not plaintext:
         die("stdin is empty")
     text = plaintext.decode("utf-8", "surrogateescape")
-    cipher = encrypt(encode_vault(text), to)
-    items = split_pack(existing) + [cipher] if existing else [cipher]
-    url = build_url(to=to, ciphertext=join_pack(items))
+    url = build_url(to=to, ciphertext=encrypt(encode_vault(text), to))
     warn_url(url)
     print(url)
     return 0
@@ -361,7 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
     inv.add_argument("--to", help="recipient; default is the local identity")
 
     s = sub.add_parser("seal", help="encrypt a vault from stdin and print a URL")
-    s.add_argument("--url", help="invite or existing inbox URL (uses its to=, appends c=)")
+    s.add_argument("--url", help="invite or existing URL (uses its to= only; always one vault)")
     s.add_argument("--to", help="recipient if you are not passing --url")
 
     o = sub.add_parser("open", help="decrypt a URL to stdout")

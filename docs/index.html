@@ -56,7 +56,7 @@
 <body>
   <main>
     <h1>age inbox</h1>
-    <p class="lead">The vault is the secret: a <code>.env</code> or any text. Names stay inside it, so they get encrypted too. The URL is only <code>to=</code> and ciphertext.</p>
+    <p class="lead">The vault is the secret: a <code>.env</code> or any text. One seal is one compressed vault, so the URL stays short. To add keys, edit the vault and seal again.</p>
 
     <section id="create">
       <h2>Your key</h2>
@@ -96,7 +96,6 @@
       <p class="note" id="url-len"></p>
       <div class="row">
         <button type="button" id="do-open">Open</button>
-        <button type="button" class="ghost" id="do-compact" disabled>Compact</button>
         <button type="button" class="ghost" id="copy-secret" disabled>Copy vault</button>
       </div>
       <p class="note" id="open-note"></p>
@@ -104,7 +103,7 @@
     </section>
 
     <footer>
-      The whole vault is zstd-compressed, then age-encrypted. Ciphertext lives in the URL hash; seal again to append.
+      The whole vault is zstd-compressed, then age-encrypted, as one ciphertext. Seal again replaces it.
       Interoperable with <code>age</code>, <code>zstd</code>, and the <code>inbox</code> CLI.
       Crypto is <a href="https://github.com/FiloSottile/typage">age-encryption 0.3.0</a> and
       <a href="https://github.com/bokuweb/zstd-wasm">zstd-wasm 0.0.27</a>, both vendored next to this page.
@@ -289,7 +288,6 @@
       const id = identityLine($("identity").value);
       $("mk-invite").disabled = !id;
       $("dl").disabled = !id;
-      $("do-compact").disabled = !id;
       $("pub").textContent = "";
       $("pub").className = "note";
       if (!id) return;
@@ -352,15 +350,8 @@
         return;
       }
       try {
-        const existing = currentParams();
         const cipher = await encryptBytes(encodeVault(vault), to);
-        let blob = cipher;
-        let appended = false;
-        if (existing.c && existing.to === to) {
-          blob = joinPack([...splitPack(b64urlDecode(existing.c)), cipher]);
-          appended = true;
-        }
-        const href = buildHref({ to, c: b64urlEncode(blob) });
+        const href = buildHref({ to, c: b64urlEncode(cipher) });
         lastHref = href;
         history.replaceState(null, "", href);
         $("url").value = href;
@@ -371,9 +362,7 @@
         const warn = href.length > 2000
           ? ` URL is ${href.length} chars; some chats will truncate it.`
           : ` URL is ${href.length} chars.`;
-        $("seal-note").textContent = (appended
-          ? "Appended. Share the URL. Seal again to add another vault chunk."
-          : "Sealed. The URL has no names in it. Seal again to append.") + warn;
+        $("seal-note").textContent = "Sealed as one vault." + warn;
         $("seal-note").className = href.length > 2000 ? "note warn" : "note ok";
       } catch (err) {
         $("seal-note").textContent = String(err.message || err);
@@ -432,27 +421,6 @@
       }
     };
 
-    $("do-compact").onclick = async () => {
-      try {
-        const opened = await doOpen();
-        if (!opened) return;
-        const { params, vault } = opened;
-        const blob = await encryptBytes(encodeVault(vault), params.to);
-        const href = buildHref({ to: params.to, c: b64urlEncode(blob) });
-        lastHref = href;
-        history.replaceState(null, "", href);
-        $("url").value = href;
-        $("sealed").textContent = href;
-        $("sealed").classList.remove("hidden");
-        $("copy-url").disabled = false;
-        showUrlLen(href);
-        $("open-note").textContent = `Compacted into one vault. URL is ${href.length} chars.`;
-        $("open-note").className = href.length > 2000 ? "note warn" : "note ok";
-      } catch {
-        $("open-note").textContent = "404 Not Found";
-        $("open-note").className = "note bad";
-      }
-    };
 
     $("copy-secret").onclick = async () => {
       if (!lastPlain) return;
@@ -469,7 +437,7 @@
       if (fromHash.c) {
         $("open-note").textContent = "Sealed URL loaded. Paste the matching identity and hit Open.";
       } else if (fromHash.to) {
-        $("open-note").textContent = "Invite loaded. Paste a vault and seal it.";
+        $("open-note").textContent = "Invite loaded. Paste a vault and seal it. One seal is the whole vault.";
       }
     })();
   </script>

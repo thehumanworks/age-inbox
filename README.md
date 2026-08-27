@@ -5,10 +5,10 @@ The URL is the secret. No server stores ciphertext.
 The vault is whatever you encrypt, typically a `.env`. Names live inside that text, so they are encrypted with the values. The URL is only `to=` (public key) and `c=` (ciphertext).
 
 - **Invite** (owner): publish your `age1` public key as a URL.
-- **Seal** (writer): zstd-compress the vault, then age-encrypt it.
-- **Append**: seal again against a URL that already has `c=`. Writers do not need the private key.
+- **Seal** (writer): zstd-compress the whole vault, then age-encrypt it as one ciphertext.
 - **Open** (owner): decrypt with the matching `AGE-SECRET-KEY-1`.
-- **Compact** (owner): merge packed vault chunks into one zstd+age file.
+- **Add keys**: edit the vault and seal again. That replaces the ciphertext. One vault, one short URL.
+- **Compact**: only for older packed URLs. New seals are already one vault.
 
 https://thehumanworks.github.io/age-inbox/
 
