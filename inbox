@@ -3,8 +3,7 @@
 
   https://thehumanworks.github.io/age-inbox/#to=<age1>&c=<pack>
 
-No server. `to` is the public key. Writers seal (and can append) without
-the private key. Only the matching identity can open.
+No server. `to` is the public key. Writers seal a whole vault to that key. Only the matching identity can open.
 
 The vault is whatever you encrypt: typically a .env. Names live inside
 that text, so they are zstd-compressed and age-encrypted with the values.
