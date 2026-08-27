@@ -122,7 +122,6 @@
     const $ = (id) => document.getElementById(id);
     const PACK_MAGIC = new TextEncoder().encode("AIP1");
     const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd];
-    const GZIP_MAGIC = [0x1f, 0x8b];
     const enc = new TextEncoder();
     const dec = new TextDecoder();
 
@@ -222,40 +221,25 @@
       }
       return out;
     }
-    async function gunzip(bytes) {
-      const ds = new DecompressionStream("gzip");
-      const stream = new Blob([bytes]).stream().pipeThrough(ds);
-      return new Uint8Array(await new Response(stream).arrayBuffer());
-    }
     function encodeSecrets(secrets) {
       const json = JSON.stringify({ secrets });
       return zstdCompress(enc.encode(json), 19);
     }
-    async function decodePlain(plain) {
-      let data = plain;
-      if (startsWith(data, ZSTD_MAGIC)) {
-        data = zstdDecompress(data);
-      } else if (startsWith(data, GZIP_MAGIC)) {
-        try { data = await gunzip(data); } catch { return [{ n: "", v: dec.decode(plain) }]; }
+    function decodePlain(plain) {
+      if (!startsWith(plain, ZSTD_MAGIC)) {
+        throw new Error("payload is not zstd; raw age is not supported");
       }
-      let text;
-      try { text = dec.decode(data); } catch { return [{ n: "", v: dec.decode(plain) }]; }
-      try {
-        const obj = JSON.parse(text);
-        if (obj && Array.isArray(obj.secrets)) {
-          const out = [];
-          for (const item of obj.secrets) {
-            if (item && typeof item === "object") out.push({ n: String(item.n || ""), v: String(item.v || "") });
-          }
-          return out.length ? out : [{ n: "", v: text }];
-        }
-        if (obj && typeof obj === "object" && "v" in obj) {
-          return [{ n: String(obj.n || ""), v: String(obj.v || "") }];
-        }
-        return [{ n: "", v: text }];
-      } catch {
-        return [{ n: "", v: text }];
+      const data = zstdDecompress(plain);
+      const obj = JSON.parse(dec.decode(data));
+      if (!obj || !Array.isArray(obj.secrets)) {
+        throw new Error("payload is not an inbox secrets list");
       }
+      const out = [];
+      for (const item of obj.secrets) {
+        if (item && typeof item === "object") out.push({ n: String(item.n || ""), v: String(item.v || "") });
+      }
+      if (!out.length) throw new Error("payload secrets list is empty");
+      return out;
     }
     async function encryptBytes(plain, recipient) {
       const e = new age.Encrypter();

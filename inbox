@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import gzip
 import json
 import os
 import shutil
@@ -38,7 +37,6 @@ DEFAULT_BASE = "https://thehumanworks.github.io/age-inbox/"
 PACK_MAGIC = b"AIP1"
 AGE_MAGIC = b"age-encryption.org/v1"
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
-GZIP_MAGIC = b"\x1f\x8b"
 
 
 def die(msg: str, code: int = 2) -> None:
@@ -235,27 +233,22 @@ def encode_secrets(secrets: list[dict[str, str]]) -> bytes:
 
 
 def decode_plain(plain: bytes) -> list[dict[str, str]]:
-    data = plain
-    if data.startswith(ZSTD_MAGIC):
-        data = zstd_decompress(data)
-    elif data.startswith(GZIP_MAGIC):
-        try:
-            data = gzip.decompress(data)
-        except OSError:
-            return [{"n": "", "v": plain.decode("utf-8", "surrogateescape")}]
+    if not plain.startswith(ZSTD_MAGIC):
+        die("payload is not zstd; raw age is not supported")
+    data = zstd_decompress(plain)
     try:
         obj = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return [{"n": "", "v": data.decode("utf-8", "surrogateescape")}]
-    if isinstance(obj, dict) and isinstance(obj.get("secrets"), list):
-        out = []
-        for item in obj["secrets"]:
-            if isinstance(item, dict):
-                out.append({"n": str(item.get("n") or ""), "v": str(item.get("v") or "")})
-        return out or [{"n": "", "v": data.decode("utf-8", "surrogateescape")}]
-    if isinstance(obj, dict) and "v" in obj:
-        return [{"n": str(obj.get("n") or ""), "v": str(obj.get("v") or "")}]
-    return [{"n": "", "v": data.decode("utf-8", "surrogateescape")}]
+        die("payload is not inbox JSON")
+    if not (isinstance(obj, dict) and isinstance(obj.get("secrets"), list)):
+        die("payload is not an inbox secrets list")
+    out = []
+    for item in obj["secrets"]:
+        if isinstance(item, dict):
+            out.append({"n": str(item.get("n") or ""), "v": str(item.get("v") or "")})
+    if not out:
+        die("payload secrets list is empty")
+    return out
 
 
 def open_all(blob: bytes, ident: Path) -> list[dict[str, str]]:

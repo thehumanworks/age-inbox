@@ -14,7 +14,7 @@ https://thehumanworks.github.io/age-inbox/
 
 Crypto in the browser is [age-encryption 0.3.0](https://github.com/FiloSottile/typage), vendored in `docs/age.js`, plus [zstd-wasm 0.0.27](https://github.com/bokuweb/zstd-wasm) vendored in `docs/zstd/`. Interoperable with the `age` and `zstd` CLIs.
 
-New secrets are **zstd (level 19)** of `{"secrets":[{"n":"NAME","v":"…"}]}` then age-encrypted. Legacy URLs (raw age of raw plaintext, no zstd) still open. Gzip-compressed blobs still decompress for compatibility.
+Payload is **zstd (level 19)** of `{"secrets":[{"n":"NAME","v":"…"}]}` then age-encrypted. Raw age (plaintext, no zstd) is rejected.
 
 ## CLI
 
