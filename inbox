@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""Client-side age inbox. The URL is the secret.
+
+  ageinbox:1?to=<age1 recipient>&n=<name>&c=<urlsafe-base64 of age ciphertext>
+
+No server. The public key is in `to` so anyone with the URL can encrypt
+another secret to you. Only the holder of the matching identity can open it.
+The CLI is a wrapper around `age`.
+
+  inbox init
+  inbox invite [--name NAME]
+  inbox seal [--url URL] [--name NAME]     # plaintext on stdin, prints a URL
+  inbox open URL                           # decrypts to stdout
+  inbox to URL                             # print the recipient from a URL
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import os
+import shutil
+import subprocess
+import sys
+import urllib.parse
+from pathlib import Path
+
+SCHEME = "ageinbox"
+VERSION = "1"
+DEFAULT_BASE = "https://thehumanworks.github.io/age-inbox/"
+
+
+def die(msg: str, code: int = 2) -> None:
+    print(f"inbox: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def require_age() -> None:
+    if shutil.which("age") is None or shutil.which("age-keygen") is None:
+        die("age and age-keygen must be on PATH")
+
+
+def identity_path() -> Path:
+    override = os.environ.get("AGE_INBOX_IDENTITY")
+    if override:
+        return Path(override).expanduser()
+    return Path.cwd() / ".age-inbox" / "identity"
+
+
+def recipient_from_identity(path: Path) -> str:
+    if not path.is_file():
+        die(f"no identity at {path}. Run: inbox init")
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("# public key:"):
+            rec = line.split(":", 1)[1].strip()
+            if rec.startswith("age1"):
+                return rec
+    proc = subprocess.run(
+        ["age-keygen", "-y", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rec = proc.stdout.strip()
+    if not rec.startswith("age1"):
+        die(f"could not read recipient from {path}")
+    return rec
+
+
+def b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def b64url_decode(text: str) -> bytes:
+    pad = "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(text + pad)
+
+
+def parse_url(url: str) -> dict[str, str]:
+    raw = url.strip()
+    if raw.startswith(f"{SCHEME}:"):
+        rest = raw[len(SCHEME) + 1 :]
+        if rest.startswith("//"):
+            rest = rest[2:]
+        if rest.startswith(f"{VERSION}?"):
+            query = rest[len(VERSION) + 1 :]
+        elif rest.startswith("?"):
+            query = rest[1:]
+        else:
+            # ageinbox:1?… already handled; also accept ageinbox:?to=
+            query = rest.split("?", 1)[1] if "?" in rest else rest
+        qs = urllib.parse.parse_qs(query, keep_blank_values=True)
+    else:
+        parts = urllib.parse.urlsplit(raw)
+        qs = urllib.parse.parse_qs(parts.query)
+        if parts.fragment:
+            frag = parts.fragment
+            if frag.startswith("?"):
+                frag = frag[1:]
+            qs = {**qs, **urllib.parse.parse_qs(frag)}
+    out: dict[str, str] = {}
+    for key in ("to", "n", "c"):
+        vals = qs.get(key)
+        if vals:
+            out[key] = vals[0]
+    if "to" not in out or not out["to"].startswith("age1"):
+        die("url must include to=age1… (the public key)")
+    return out
+
+
+def inbox_base() -> str | None:
+    raw = os.environ.get("AGE_INBOX_BASE")
+    if raw == "":
+        return None
+    if raw:
+        return raw if raw.endswith("/") else raw + "/"
+    return DEFAULT_BASE
+
+
+def build_url(*, to: str, name: str | None = None, ciphertext: bytes | None = None) -> str:
+    q: list[tuple[str, str]] = [("to", to)]
+    if name:
+        q.append(("n", name))
+    if ciphertext is not None:
+        q.append(("c", b64url_encode(ciphertext)))
+    query = urllib.parse.urlencode(q, safe="")
+    base = inbox_base()
+    if base is None:
+        return f"{SCHEME}:{VERSION}?{query}"
+    return f"{base}#{query}"
+
+
+def encrypt(plaintext: bytes, recipient: str) -> bytes:
+    proc = subprocess.run(
+        ["age", "-r", recipient],
+        input=plaintext,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        die(proc.stderr.decode() or "age encrypt failed", 1)
+    return proc.stdout
+
+
+def decrypt(ciphertext: bytes, ident: Path) -> bytes:
+    proc = subprocess.run(
+        ["age", "-d", "-i", str(ident)],
+        input=ciphertext,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        die(proc.stderr.decode() or "age decrypt failed", 1)
+    return proc.stdout
+
+
+def cmd_init(_args: argparse.Namespace) -> int:
+    require_age()
+    path = identity_path()
+    if path.exists():
+        print(f"identity already exists: {path}", file=sys.stderr)
+        print(recipient_from_identity(path))
+        return 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["age-keygen", "-o", str(path)], check=True)
+    path.chmod(0o600)
+    rec = recipient_from_identity(path)
+    print(f"wrote {path}", file=sys.stderr)
+    print(rec)
+    return 0
+
+
+def cmd_invite(args: argparse.Namespace) -> int:
+    to = args.to or recipient_from_identity(identity_path())
+    print(build_url(to=to, name=args.name))
+    return 0
+
+
+def cmd_seal(args: argparse.Namespace) -> int:
+    require_age()
+    if args.url:
+        parsed = parse_url(args.url)
+        to = parsed["to"]
+        name = args.name or parsed.get("n")
+    else:
+        to = args.to or recipient_from_identity(identity_path())
+        name = args.name
+    plaintext = sys.stdin.buffer.read()
+    if not plaintext:
+        die("stdin is empty")
+    cipher = encrypt(plaintext, to)
+    url = build_url(to=to, name=name, ciphertext=cipher)
+    if len(url) > 2000:
+        print(
+            f"inbox: warning: url is {len(url)} chars; some browsers and chats will truncate it",
+            file=sys.stderr,
+        )
+    print(url)
+    return 0
+
+
+def cmd_open(args: argparse.Namespace) -> int:
+    require_age()
+    parsed = parse_url(args.url)
+    if "c" not in parsed:
+        die("url has no ciphertext (c=). This is an invite. Seal a secret first.")
+    ident = identity_path()
+    if not ident.is_file():
+        die(f"no identity at {ident}. Run: inbox init")
+    cipher = b64url_decode(parsed["c"])
+    sys.stdout.buffer.write(decrypt(cipher, ident))
+    return 0
+
+
+def cmd_to(args: argparse.Namespace) -> int:
+    print(parse_url(args.url)["to"])
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="inbox", description=__doc__)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("init", help="generate a local age identity")
+
+    inv = sub.add_parser("invite", help="print a write-only URL that carries your public key")
+    inv.add_argument("--name", help="optional secret name baked into the invite")
+    inv.add_argument("--to", help="recipient; default is the local identity")
+
+    s = sub.add_parser("seal", help="encrypt stdin and print a URL")
+    s.add_argument("--url", help="invite or existing inbox URL (uses its to=)")
+    s.add_argument("--to", help="recipient if you are not passing --url")
+    s.add_argument("--name", "-n")
+
+    o = sub.add_parser("open", help="decrypt a URL to stdout")
+    o.add_argument("url")
+
+    t = sub.add_parser("to", help="print the public key from a URL")
+    t.add_argument("url")
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.cmd == "init":
+        return cmd_init(args)
+    if args.cmd == "invite":
+        return cmd_invite(args)
+    if args.cmd == "seal":
+        return cmd_seal(args)
+    if args.cmd == "open":
+        return cmd_open(args)
+    if args.cmd == "to":
+        return cmd_to(args)
+    die("unknown command")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

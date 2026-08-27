@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>age inbox</title>
+  <meta name="description" content="Client-side age secret inbox. The URL is the secret. Nothing is uploaded.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>✉</text></svg>">
+  <style>
+    :root {
+      --bg: #11140f;
+      --fg: #e8edd8;
+      --muted: #9aa38a;
+      --line: #2a3124;
+      --card: #1a1f17;
+      --accent: #c6e07a;
+      --warn: #e0b36a;
+      --bad: #e07a7a;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 ui-sans-serif, system-ui, sans-serif; }
+    main { max-width: 40rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    h1 { font-size: 1.35rem; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 0.35rem; }
+    p.lead { color: var(--muted); margin: 0 0 1.75rem; }
+    section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1.15rem 1.2rem 1.25rem; margin: 0 0 1rem; }
+    section h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 0.85rem; font-weight: 600; }
+    label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.7rem 0 0.3rem; }
+    input, textarea {
+      width: 100%; background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 0.6rem 0.7rem; font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem;
+    }
+    textarea { min-height: 6rem; resize: vertical; }
+    textarea.secret { min-height: 4.5rem; }
+    button, .btn {
+      appearance: none; border: 0; background: var(--accent); color: #14180f; font: inherit; font-weight: 600;
+      padding: 0.55rem 0.85rem; border-radius: 8px; cursor: pointer; margin: 0.85rem 0.4rem 0 0;
+    }
+    button.ghost, a.ghost {
+      background: transparent; color: var(--fg); border: 1px solid var(--line); text-decoration: none; display: inline-block;
+    }
+    .out {
+      margin-top: 0.9rem; padding: 0.75rem 0.8rem; background: var(--bg); border-radius: 8px; word-break: break-all;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; white-space: pre-wrap;
+    }
+    .note { color: var(--muted); font-size: 0.85rem; margin: 0.6rem 0 0; }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    .ok { color: var(--accent); }
+    .row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+    footer { color: var(--muted); font-size: 0.8rem; margin-top: 1.5rem; }
+    footer a { color: var(--accent); }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>age inbox</h1>
+    <p class="lead">The URL is the secret. Encryption runs in this tab. Nothing is uploaded.</p>
+
+    <section id="create">
+      <h2>Your key</h2>
+      <p class="note">Need an inbox? Generate an age identity here, or paste one from <code>age-keygen</code>.</p>
+      <div class="row">
+        <button type="button" id="gen">Generate identity</button>
+        <button type="button" class="ghost" id="dl" disabled>Download key file</button>
+      </div>
+      <label for="identity">Identity (AGE-SECRET-KEY-1…)</label>
+      <textarea id="identity" class="secret" autocomplete="off" spellcheck="false" placeholder="AGE-SECRET-KEY-1…"></textarea>
+      <p class="note" id="pub"></p>
+      <div class="row">
+        <button type="button" class="ghost" id="mk-invite" disabled>Copy invite link</button>
+      </div>
+      <p class="note warn">Opening a secret in the browser means this page sees your private key. It stays in memory in this tab. Prefer the CLI for open if that bothers you.</p>
+    </section>
+
+    <section id="seal">
+      <h2>Seal a secret</h2>
+      <label for="to">Recipient (age1…)</label>
+      <input id="to" spellcheck="false" placeholder="age1…">
+      <label for="name">Name (optional)</label>
+      <input id="name" placeholder="STRIPE">
+      <label for="plain">Secret</label>
+      <textarea id="plain" autocomplete="off" spellcheck="false"></textarea>
+      <div class="row">
+        <button type="button" id="do-seal">Seal</button>
+        <button type="button" class="ghost" id="copy-url" disabled>Copy URL</button>
+      </div>
+      <p class="note" id="seal-note"></p>
+      <div class="out hidden" id="sealed"></div>
+    </section>
+
+    <section id="open">
+      <h2>Open</h2>
+      <p class="note" id="open-meta">Paste a sealed URL, or open one. Decrypt uses the identity above.</p>
+      <label for="url">URL</label>
+      <textarea id="url" spellcheck="false" placeholder="https://…/#to=age1…&amp;c=…"></textarea>
+      <div class="row">
+        <button type="button" id="do-open">Open</button>
+        <button type="button" class="ghost" id="copy-secret" disabled>Copy plaintext</button>
+      </div>
+      <p class="note" id="open-note"></p>
+      <div class="out hidden" id="opened"></div>
+    </section>
+
+    <footer>
+      Interoperable with <code>age</code> and the <code>inbox</code> CLI.
+      Crypto is <a href="https://github.com/FiloSottile/typage">age-encryption 0.3.0</a>, vendored next to this page.
+      Ciphertext lives in the URL hash, so the host never sees it.
+    </footer>
+  </main>
+  <script src="age.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function b64urlEncode(bytes) {
+      let bin = "";
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    }
+    function b64urlDecode(text) {
+      const pad = "=".repeat((4 - (text.length % 4)) % 4);
+      const b64 = text.replace(/-/g, "+").replace(/_/g, "/") + pad;
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+    function parseParams(raw) {
+      const out = {};
+      if (!raw) return out;
+      let s = raw.trim();
+      let query = "";
+      if (s.startsWith("ageinbox:")) {
+        const rest = s.slice("ageinbox:".length).replace(/^\/\//, "");
+        query = rest.includes("?") ? rest.slice(rest.indexOf("?") + 1) : rest.replace(/^1/, "");
+      } else {
+        try {
+          const u = new URL(s);
+          query = u.search.startsWith("?") ? u.search.slice(1) : "";
+          if (u.hash) {
+            const frag = u.hash.startsWith("#") ? u.hash.slice(1) : u.hash;
+            query = query ? query + "&" + (frag.startsWith("?") ? frag.slice(1) : frag) : (frag.startsWith("?") ? frag.slice(1) : frag);
+          }
+        } catch {
+          query = s.startsWith("#") ? s.slice(1) : s;
+        }
+      }
+      const qs = new URLSearchParams(query);
+      for (const key of ["to", "n", "c", "v"]) {
+        const val = qs.get(key);
+        if (val) out[key] = val;
+      }
+      return out;
+    }
+    function buildHref(params) {
+      const qs = new URLSearchParams();
+      if (params.to) qs.set("to", params.to);
+      if (params.n) qs.set("n", params.n);
+      if (params.c) qs.set("c", params.c);
+      const loc = new URL(location.href);
+      loc.hash = qs.toString();
+      loc.search = "";
+      return loc.href;
+    }
+    function identityLine(text) {
+      const line = (text || "").split(/\r?\n/).map((l) => l.trim()).find((l) => l.startsWith("AGE-SECRET-KEY-"));
+      return line || "";
+    }
+    async function recipientFromIdentity(id) {
+      return await age.identityToRecipient(id);
+    }
+
+    let lastPlain = "";
+    let lastHref = "";
+
+    async function refreshPub() {
+      const id = identityLine($("identity").value);
+      $("mk-invite").disabled = !id;
+      $("dl").disabled = !id;
+      $("pub").textContent = "";
+      if (!id) return;
+      try {
+        const rec = await recipientFromIdentity(id);
+        $("pub").innerHTML = `Public key: <code>${rec}</code>`;
+        if (!$("to").value) $("to").value = rec;
+      } catch (err) {
+        $("pub").textContent = String(err.message || err);
+        $("pub").className = "note bad";
+      }
+    }
+
+    $("gen").onclick = async () => {
+      const identity = await age.generateIdentity();
+      const recipient = await age.identityToRecipient(identity);
+      const file = `# created: ${new Date().toISOString()}\n# public key: ${recipient}\n${identity}\n`;
+      $("identity").value = file;
+      $("to").value = recipient;
+      await refreshPub();
+    };
+
+    $("dl").onclick = () => {
+      const id = identityLine($("identity").value);
+      if (!id) return;
+      const blob = new Blob([$("identity").value.endsWith("\n") ? $("identity").value : $("identity").value + "\n"], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "age-inbox-identity.txt";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+
+    $("mk-invite").onclick = async () => {
+      const id = identityLine($("identity").value);
+      const rec = await recipientFromIdentity(id);
+      const href = buildHref({ to: rec, n: $("name").value.trim() || undefined });
+      await navigator.clipboard.writeText(href);
+      $("mk-invite").textContent = "Copied invite";
+      setTimeout(() => { $("mk-invite").textContent = "Copy invite link"; }, 1500);
+    };
+
+    $("identity").addEventListener("input", () => { refreshPub(); });
+
+    $("do-seal").onclick = async () => {
+      $("seal-note").textContent = "";
+      $("sealed").classList.add("hidden");
+      $("copy-url").disabled = true;
+      const to = $("to").value.trim();
+      const plain = $("plain").value;
+      if (!to.startsWith("age1")) {
+        $("seal-note").textContent = "Recipient must be an age1… public key.";
+        $("seal-note").className = "note bad";
+        return;
+      }
+      if (!plain) {
+        $("seal-note").textContent = "Secret is empty.";
+        $("seal-note").className = "note bad";
+        return;
+      }
+      try {
+        const e = new age.Encrypter();
+        e.addRecipient(to);
+        const ciphertext = await e.encrypt(plain);
+        const href = buildHref({ to, n: $("name").value.trim() || undefined, c: b64urlEncode(ciphertext) });
+        lastHref = href;
+        history.replaceState(null, "", href);
+        $("url").value = href;
+        $("sealed").textContent = href;
+        $("sealed").classList.remove("hidden");
+        $("copy-url").disabled = false;
+        const warn = href.length > 2000
+          ? ` URL is ${href.length} chars; some chats will truncate it.`
+          : "";
+        $("seal-note").textContent = "Sealed. Share the URL. Anyone with it can also seal another secret to the same key." + warn;
+        $("seal-note").className = "note ok";
+      } catch (err) {
+        $("seal-note").textContent = String(err.message || err);
+        $("seal-note").className = "note bad";
+      }
+    };
+
+    $("copy-url").onclick = async () => {
+      if (!lastHref) return;
+      await navigator.clipboard.writeText(lastHref);
+      $("copy-url").textContent = "Copied";
+      setTimeout(() => { $("copy-url").textContent = "Copy URL"; }, 1500);
+    };
+
+    $("do-open").onclick = async () => {
+      $("open-note").textContent = "";
+      $("opened").classList.add("hidden");
+      $("copy-secret").disabled = true;
+      lastPlain = "";
+      const params = parseParams($("url").value || location.hash);
+      if (!params.to || !params.to.startsWith("age1")) {
+        $("open-note").textContent = "URL needs to=age1…";
+        $("open-note").className = "note bad";
+        return;
+      }
+      if (!params.c) {
+        $("to").value = params.to;
+        if (params.n) $("name").value = params.n;
+        $("open-note").textContent = "That URL is an invite (no ciphertext). Seal a secret to it.";
+        $("open-note").className = "note";
+        return;
+      }
+      const id = identityLine($("identity").value);
+      if (!id) {
+        $("open-note").textContent = "Paste the matching AGE-SECRET-KEY-1… above first.";
+        $("open-note").className = "note bad";
+        return;
+      }
+      try {
+        const d = new age.Decrypter();
+        d.addIdentity(id);
+        const out = await d.decrypt(b64urlDecode(params.c), "text");
+        lastPlain = out;
+        $("opened").textContent = out;
+        $("opened").classList.remove("hidden");
+        $("copy-secret").disabled = false;
+        $("open-note").textContent = params.n ? `Opened “${params.n}”.` : "Opened.";
+        $("open-note").className = "note ok";
+      } catch (err) {
+        $("open-note").textContent = String(err.message || err);
+        $("open-note").className = "note bad";
+      }
+    };
+
+    $("copy-secret").onclick = async () => {
+      if (!lastPlain) return;
+      await navigator.clipboard.writeText(lastPlain);
+      $("copy-secret").textContent = "Copied";
+      setTimeout(() => { $("copy-secret").textContent = "Copy plaintext"; }, 1500);
+    };
+
+    (async () => {
+      const fromHash = parseParams(location.hash);
+      if (fromHash.to) $("to").value = fromHash.to;
+      if (fromHash.n) $("name").value = fromHash.n;
+      if (fromHash.to || fromHash.c) {
+        $("url").value = location.href;
+      }
+      if (fromHash.c) {
+        $("open-note").textContent = "Sealed URL loaded. Paste the matching identity and hit Open.";
+      } else if (fromHash.to) {
+        $("open-note").textContent = "Invite loaded. Type a secret and seal it.";
+      }
+    })();
+  </script>
+</body>
+</html>
