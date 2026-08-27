@@ -1,1 +1,4 @@
 .age-inbox/
+node_modules/
+__pycache__/
+*.pyc

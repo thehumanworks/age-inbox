@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
 """Client-side age inbox. The URL is the secret.
 
-  ageinbox:1?to=<age1 recipient>&n=<name>&c=<urlsafe-base64 of age ciphertext>
+  https://thehumanworks.github.io/age-inbox/#to=<age1>&n=<names>&c=<pack>
 
-No server. The public key is in `to` so anyone with the URL can encrypt
-another secret to you. Only the holder of the matching identity can open it.
-The CLI is a wrapper around `age`.
+No server. `to` is the public key. Writers seal (and can append) without
+the private key. Only the matching identity can open.
+
+New secrets are zstd-compressed (level 19), then age-encrypted. Several
+secrets in one URL are a length-prefixed pack of age files (AIP1).
+`inbox compact` merges them into one zstd blob so the URL stays small.
 
   inbox init
   inbox invite [--name NAME]
-  inbox seal [--url URL] [--name NAME]     # plaintext on stdin, prints a URL
-  inbox open URL                           # decrypts to stdout
-  inbox to URL                             # print the recipient from a URL
+  inbox seal [--url URL] [--name NAME]   # stdin plaintext; appends if URL has c=
+  inbox open URL
+  inbox compact URL                      # needs identity; prints a shorter URL
+  inbox to URL
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import gzip
+import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import urllib.parse
@@ -28,6 +35,10 @@ from pathlib import Path
 SCHEME = "ageinbox"
 VERSION = "1"
 DEFAULT_BASE = "https://thehumanworks.github.io/age-inbox/"
+PACK_MAGIC = b"AIP1"
+AGE_MAGIC = b"age-encryption.org/v1"
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+GZIP_MAGIC = b"\x1f\x8b"
 
 
 def die(msg: str, code: int = 2) -> None:
@@ -35,9 +46,11 @@ def die(msg: str, code: int = 2) -> None:
     raise SystemExit(code)
 
 
-def require_age() -> None:
+def require_tools(*, need_zstd: bool = False) -> None:
     if shutil.which("age") is None or shutil.which("age-keygen") is None:
         die("age and age-keygen must be on PATH")
+    if need_zstd and shutil.which("zstd") is None:
+        die("zstd must be on PATH")
 
 
 def identity_path() -> Path:
@@ -87,7 +100,6 @@ def parse_url(url: str) -> dict[str, str]:
         elif rest.startswith("?"):
             query = rest[1:]
         else:
-            # ageinbox:1?… already handled; also accept ageinbox:?to=
             query = rest.split("?", 1)[1] if "?" in rest else rest
         qs = urllib.parse.parse_qs(query, keep_blank_values=True)
     else:
@@ -115,6 +127,16 @@ def inbox_base() -> str | None:
     if raw:
         return raw if raw.endswith("/") else raw + "/"
     return DEFAULT_BASE
+
+
+def name_list(text: str | None) -> list[str]:
+    if not text:
+        return []
+    return [p for p in (s.strip() for s in text.split(",")) if p]
+
+
+def join_names(names: list[str]) -> str | None:
+    return ",".join(names) if names else None
 
 
 def build_url(*, to: str, name: str | None = None, ciphertext: bytes | None = None) -> str:
@@ -154,8 +176,115 @@ def decrypt(ciphertext: bytes, ident: Path) -> bytes:
     return proc.stdout
 
 
+def zstd_compress(data: bytes) -> bytes:
+    proc = subprocess.run(
+        ["zstd", "-19", "-q", "-c"],
+        input=data,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        die(proc.stderr.decode() or "zstd compress failed", 1)
+    return proc.stdout
+
+
+def zstd_decompress(data: bytes) -> bytes:
+    proc = subprocess.run(
+        ["zstd", "-d", "-q", "-c"],
+        input=data,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        die(proc.stderr.decode() or "zstd decompress failed", 1)
+    return proc.stdout
+
+
+def split_pack(blob: bytes) -> list[bytes]:
+    if blob.startswith(PACK_MAGIC):
+        items: list[bytes] = []
+        off = len(PACK_MAGIC)
+        while off < len(blob):
+            if off + 4 > len(blob):
+                die("truncated pack")
+            (n,) = struct.unpack_from(">I", blob, off)
+            off += 4
+            if n < 0 or off + n > len(blob):
+                die("truncated pack frame")
+            items.append(blob[off : off + n])
+            off += n
+        if not items:
+            die("empty pack")
+        return items
+    return [blob]
+
+
+def join_pack(items: list[bytes]) -> bytes:
+    if len(items) == 1:
+        return items[0]
+    out = bytearray(PACK_MAGIC)
+    for item in items:
+        out.extend(struct.pack(">I", len(item)))
+        out.extend(item)
+    return bytes(out)
+
+
+def encode_secrets(secrets: list[dict[str, str]]) -> bytes:
+    payload = json.dumps({"secrets": secrets}, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return zstd_compress(payload)
+
+
+def decode_plain(plain: bytes) -> list[dict[str, str]]:
+    data = plain
+    if data.startswith(ZSTD_MAGIC):
+        data = zstd_decompress(data)
+    elif data.startswith(GZIP_MAGIC):
+        try:
+            data = gzip.decompress(data)
+        except OSError:
+            return [{"n": "", "v": plain.decode("utf-8", "surrogateescape")}]
+    try:
+        obj = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return [{"n": "", "v": data.decode("utf-8", "surrogateescape")}]
+    if isinstance(obj, dict) and isinstance(obj.get("secrets"), list):
+        out = []
+        for item in obj["secrets"]:
+            if isinstance(item, dict):
+                out.append({"n": str(item.get("n") or ""), "v": str(item.get("v") or "")})
+        return out or [{"n": "", "v": data.decode("utf-8", "surrogateescape")}]
+    if isinstance(obj, dict) and "v" in obj:
+        return [{"n": str(obj.get("n") or ""), "v": str(obj.get("v") or "")}]
+    return [{"n": "", "v": data.decode("utf-8", "surrogateescape")}]
+
+
+def open_all(blob: bytes, ident: Path) -> list[dict[str, str]]:
+    secrets: list[dict[str, str]] = []
+    for item in split_pack(blob):
+        secrets.extend(decode_plain(decrypt(item, ident)))
+    return secrets
+
+
+def format_secrets(secrets: list[dict[str, str]]) -> bytes:
+    if len(secrets) == 1 and not secrets[0]["n"]:
+        return secrets[0]["v"].encode("utf-8")
+    parts = []
+    for i, item in enumerate(secrets):
+        title = item["n"] or f"secret {i + 1}"
+        parts.append(f"=== {title} ===\n{item['v']}")
+    return ("\n\n".join(parts) + "\n").encode("utf-8")
+
+
+def warn_url(url: str) -> None:
+    if len(url) > 2000:
+        print(
+            f"inbox: warning: url is {len(url)} chars; some browsers and chats will truncate it",
+            file=sys.stderr,
+        )
+
+
 def cmd_init(_args: argparse.Namespace) -> int:
-    require_age()
+    require_tools()
     path = identity_path()
     if path.exists():
         print(f"identity already exists: {path}", file=sys.stderr)
@@ -177,38 +306,62 @@ def cmd_invite(args: argparse.Namespace) -> int:
 
 
 def cmd_seal(args: argparse.Namespace) -> int:
-    require_age()
+    require_tools(need_zstd=True)
+    existing = b""
+    names: list[str] = []
     if args.url:
         parsed = parse_url(args.url)
         to = parsed["to"]
-        name = args.name or parsed.get("n")
+        names = name_list(parsed.get("n"))
+        if parsed.get("c"):
+            existing = b64url_decode(parsed["c"])
     else:
         to = args.to or recipient_from_identity(identity_path())
-        name = args.name
+    name = args.name or ""
     plaintext = sys.stdin.buffer.read()
     if not plaintext:
         die("stdin is empty")
-    cipher = encrypt(plaintext, to)
-    url = build_url(to=to, name=name, ciphertext=cipher)
-    if len(url) > 2000:
-        print(
-            f"inbox: warning: url is {len(url)} chars; some browsers and chats will truncate it",
-            file=sys.stderr,
-        )
+    text = plaintext.decode("utf-8", "surrogateescape")
+    cipher = encrypt(encode_secrets([{"n": name, "v": text}]), to)
+    items = split_pack(existing) + [cipher] if existing else [cipher]
+    if name:
+        names.append(name)
+    url = build_url(to=to, name=join_names(names), ciphertext=join_pack(items))
+    warn_url(url)
     print(url)
     return 0
 
 
 def cmd_open(args: argparse.Namespace) -> int:
-    require_age()
+    require_tools(need_zstd=True)
     parsed = parse_url(args.url)
     if "c" not in parsed:
         die("url has no ciphertext (c=). This is an invite. Seal a secret first.")
     ident = identity_path()
     if not ident.is_file():
         die(f"no identity at {ident}. Run: inbox init")
-    cipher = b64url_decode(parsed["c"])
-    sys.stdout.buffer.write(decrypt(cipher, ident))
+    secrets = open_all(b64url_decode(parsed["c"]), ident)
+    sys.stdout.buffer.write(format_secrets(secrets))
+    return 0
+
+
+def cmd_compact(args: argparse.Namespace) -> int:
+    require_tools(need_zstd=True)
+    parsed = parse_url(args.url)
+    if "c" not in parsed:
+        die("url has no ciphertext (c=). Nothing to compact.")
+    ident = identity_path()
+    if not ident.is_file():
+        die(f"no identity at {ident}. Run: inbox init")
+    secrets = open_all(b64url_decode(parsed["c"]), ident)
+    to = parsed["to"]
+    blob = encrypt(encode_secrets(secrets), to)
+    names = [s["n"] for s in secrets if s["n"]]
+    url = build_url(to=to, name=join_names(names), ciphertext=blob)
+    before = len(args.url)
+    print(f"inbox: {len(secrets)} secrets, {before} → {len(url)} chars", file=sys.stderr)
+    warn_url(url)
+    print(url)
     return 0
 
 
@@ -223,16 +376,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="generate a local age identity")
 
     inv = sub.add_parser("invite", help="print a write-only URL that carries your public key")
-    inv.add_argument("--name", help="optional secret name baked into the invite")
+    inv.add_argument("--name", help="optional inbox label")
     inv.add_argument("--to", help="recipient; default is the local identity")
 
-    s = sub.add_parser("seal", help="encrypt stdin and print a URL")
-    s.add_argument("--url", help="invite or existing inbox URL (uses its to=)")
+    s = sub.add_parser("seal", help="encrypt stdin and print a URL (appends if --url already has c=)")
+    s.add_argument("--url", help="invite or existing inbox URL (uses its to=, appends c=)")
     s.add_argument("--to", help="recipient if you are not passing --url")
     s.add_argument("--name", "-n")
 
     o = sub.add_parser("open", help="decrypt a URL to stdout")
     o.add_argument("url")
+
+    c = sub.add_parser("compact", help="merge every secret into one zstd age file")
+    c.add_argument("url")
 
     t = sub.add_parser("to", help="print the public key from a URL")
     t.add_argument("url")
@@ -249,6 +405,8 @@ def main() -> int:
         return cmd_seal(args)
     if args.cmd == "open":
         return cmd_open(args)
+    if args.cmd == "compact":
+        return cmd_compact(args)
     if args.cmd == "to":
         return cmd_to(args)
     die("unknown command")

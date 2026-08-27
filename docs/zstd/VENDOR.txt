@@ -1,0 +1,4 @@
+Vendored @bokuweb/zstd-wasm@0.0.27 dist/web (encoder+decoder).
+Loaded locally as type=module. zstd.wasm is next to index.web.js.
+Do not fetch zstd from a CDN at runtime.
+https://www.npmjs.com/package/@bokuweb/zstd-wasm/v/0.0.27
