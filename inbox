@@ -44,6 +44,11 @@ def die(msg: str, code: int = 2) -> None:
     raise SystemExit(code)
 
 
+def not_found() -> None:
+    print("404 Not Found", file=sys.stderr)
+    raise SystemExit(1)
+
+
 def require_tools(*, need_zstd: bool = False) -> None:
     if shutil.which("age") is None or shutil.which("age-keygen") is None:
         die("age and age-keygen must be on PATH")
@@ -170,7 +175,7 @@ def decrypt(ciphertext: bytes, ident: Path) -> bytes:
         check=False,
     )
     if proc.returncode != 0:
-        die(proc.stderr.decode() or "age decrypt failed", 1)
+        not_found()
     return proc.stdout
 
 
@@ -233,22 +238,24 @@ def encode_secrets(secrets: list[dict[str, str]]) -> bytes:
 
 
 def decode_plain(plain: bytes) -> list[dict[str, str]]:
-    if not plain.startswith(ZSTD_MAGIC):
-        die("payload is not zstd; raw age is not supported")
-    data = zstd_decompress(plain)
     try:
+        if not plain.startswith(ZSTD_MAGIC):
+            raise ValueError()
+        data = zstd_decompress(plain)
         obj = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        die("payload is not inbox JSON")
-    if not (isinstance(obj, dict) and isinstance(obj.get("secrets"), list)):
-        die("payload is not an inbox secrets list")
-    out = []
-    for item in obj["secrets"]:
-        if isinstance(item, dict):
-            out.append({"n": str(item.get("n") or ""), "v": str(item.get("v") or "")})
-    if not out:
-        die("payload secrets list is empty")
-    return out
+        if not (isinstance(obj, dict) and isinstance(obj.get("secrets"), list)):
+            raise ValueError()
+        out = []
+        for item in obj["secrets"]:
+            if isinstance(item, dict):
+                out.append({"n": str(item.get("n") or ""), "v": str(item.get("v") or "")})
+        if not out:
+            raise ValueError()
+        return out
+    except SystemExit:
+        raise
+    except Exception:
+        not_found()
 
 
 def open_all(blob: bytes, ident: Path) -> list[dict[str, str]]:

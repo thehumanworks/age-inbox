@@ -226,20 +226,20 @@
       return zstdCompress(enc.encode(json), 19);
     }
     function decodePlain(plain) {
-      if (!startsWith(plain, ZSTD_MAGIC)) {
-        throw new Error("payload is not zstd; raw age is not supported");
+      try {
+        if (!startsWith(plain, ZSTD_MAGIC)) throw new Error("404");
+        const data = zstdDecompress(plain);
+        const obj = JSON.parse(dec.decode(data));
+        if (!obj || !Array.isArray(obj.secrets)) throw new Error("404");
+        const out = [];
+        for (const item of obj.secrets) {
+          if (item && typeof item === "object") out.push({ n: String(item.n || ""), v: String(item.v || "") });
+        }
+        if (!out.length) throw new Error("404");
+        return out;
+      } catch {
+        throw new Error("404 Not Found");
       }
-      const data = zstdDecompress(plain);
-      const obj = JSON.parse(dec.decode(data));
-      if (!obj || !Array.isArray(obj.secrets)) {
-        throw new Error("payload is not an inbox secrets list");
-      }
-      const out = [];
-      for (const item of obj.secrets) {
-        if (item && typeof item === "object") out.push({ n: String(item.n || ""), v: String(item.v || "") });
-      }
-      if (!out.length) throw new Error("payload secrets list is empty");
-      return out;
     }
     async function encryptBytes(plain, recipient) {
       const e = new age.Encrypter();
@@ -448,8 +448,8 @@
 
     $("do-open").onclick = async () => {
       try { await doOpen(); }
-      catch (err) {
-        $("open-note").textContent = String(err.message || err);
+      catch {
+        $("open-note").textContent = "404 Not Found";
         $("open-note").className = "note bad";
       }
     };
@@ -472,8 +472,8 @@
         const before = (params && $("url").value) ? "" : "";
         $("open-note").textContent = `Compacted ${secrets.length} secrets into one zstd+age file. URL is ${href.length} chars.`;
         $("open-note").className = href.length > 2000 ? "note warn" : "note ok";
-      } catch (err) {
-        $("open-note").textContent = String(err.message || err);
+      } catch {
+        $("open-note").textContent = "404 Not Found";
         $("open-note").className = "note bad";
       }
     };
