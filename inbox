@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """Client-side age inbox. The URL is the secret.
 
-  https://thehumanworks.github.io/age-inbox/#to=<age1>&n=<names>&c=<pack>
+  https://thehumanworks.github.io/age-inbox/#to=<age1>&c=<pack>
 
 No server. `to` is the public key. Writers seal (and can append) without
 the private key. Only the matching identity can open.
 
-New secrets are zstd-compressed (level 19), then age-encrypted. Several
-secrets in one URL are a length-prefixed pack of age files (AIP1).
-`inbox compact` merges them into one zstd blob so the URL stays small.
+The vault is whatever you encrypt: typically a .env. Names live inside
+that text, so they are zstd-compressed and age-encrypted with the values.
+Nothing about the vault is put in the URL except ciphertext.
 
   inbox init
-  inbox invite [--name NAME]
-  inbox seal [--url URL] [--name NAME]   # stdin plaintext; appends if URL has c=
+  inbox invite
+  inbox seal [--url URL]     # vault on stdin; appends if URL has c=
   inbox open URL
-  inbox compact URL                      # needs identity; prints a shorter URL
+  inbox compact URL          # needs identity; prints a shorter URL
   inbox to URL
 """
 
@@ -35,7 +35,6 @@ SCHEME = "ageinbox"
 VERSION = "1"
 DEFAULT_BASE = "https://thehumanworks.github.io/age-inbox/"
 PACK_MAGIC = b"AIP1"
-AGE_MAGIC = b"age-encryption.org/v1"
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 
@@ -114,7 +113,7 @@ def parse_url(url: str) -> dict[str, str]:
                 frag = frag[1:]
             qs = {**qs, **urllib.parse.parse_qs(frag)}
     out: dict[str, str] = {}
-    for key in ("to", "n", "c"):
+    for key in ("to", "c"):
         vals = qs.get(key)
         if vals:
             out[key] = vals[0]
@@ -132,20 +131,8 @@ def inbox_base() -> str | None:
     return DEFAULT_BASE
 
 
-def name_list(text: str | None) -> list[str]:
-    if not text:
-        return []
-    return [p for p in (s.strip() for s in text.split(",")) if p]
-
-
-def join_names(names: list[str]) -> str | None:
-    return ",".join(names) if names else None
-
-
-def build_url(*, to: str, name: str | None = None, ciphertext: bytes | None = None) -> str:
+def build_url(*, to: str, ciphertext: bytes | None = None) -> str:
     q: list[tuple[str, str]] = [("to", to)]
-    if name:
-        q.append(("n", name))
     if ciphertext is not None:
         q.append(("c", b64url_encode(ciphertext)))
     query = urllib.parse.urlencode(q, safe="")
@@ -232,47 +219,50 @@ def join_pack(items: list[bytes]) -> bytes:
     return bytes(out)
 
 
-def encode_secrets(secrets: list[dict[str, str]]) -> bytes:
-    payload = json.dumps({"secrets": secrets}, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    return zstd_compress(payload)
+def encode_vault(text: str) -> bytes:
+    return zstd_compress(text.encode("utf-8"))
 
 
-def decode_plain(plain: bytes) -> list[dict[str, str]]:
+def secrets_to_env(secrets: list[dict[str, str]]) -> str:
+    lines = []
+    for item in secrets:
+        name = item.get("n") or ""
+        val = item.get("v") or ""
+        if name:
+            lines.append(f"{name}={val}")
+        else:
+            lines.append(val)
+    return "\n".join(lines)
+
+
+def decode_vault(plain: bytes) -> str:
     try:
         if not plain.startswith(ZSTD_MAGIC):
             raise ValueError()
         data = zstd_decompress(plain)
-        obj = json.loads(data.decode("utf-8"))
-        if not (isinstance(obj, dict) and isinstance(obj.get("secrets"), list)):
-            raise ValueError()
-        out = []
-        for item in obj["secrets"]:
-            if isinstance(item, dict):
-                out.append({"n": str(item.get("n") or ""), "v": str(item.get("v") or "")})
-        if not out:
-            raise ValueError()
-        return out
+        text = data.decode("utf-8")
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        if isinstance(obj, dict) and isinstance(obj.get("secrets"), list):
+            out = []
+            for item in obj["secrets"]:
+                if isinstance(item, dict):
+                    out.append({"n": str(item.get("n") or ""), "v": str(item.get("v") or "")})
+            if out:
+                return secrets_to_env(out)
+        return text
     except SystemExit:
         raise
     except Exception:
         not_found()
 
 
-def open_all(blob: bytes, ident: Path) -> list[dict[str, str]]:
-    secrets: list[dict[str, str]] = []
-    for item in split_pack(blob):
-        secrets.extend(decode_plain(decrypt(item, ident)))
-    return secrets
-
-
-def format_secrets(secrets: list[dict[str, str]]) -> bytes:
-    if len(secrets) == 1 and not secrets[0]["n"]:
-        return secrets[0]["v"].encode("utf-8")
-    parts = []
-    for i, item in enumerate(secrets):
-        title = item["n"] or f"secret {i + 1}"
-        parts.append(f"=== {title} ===\n{item['v']}")
-    return ("\n\n".join(parts) + "\n").encode("utf-8")
+def open_all(blob: bytes, ident: Path) -> str:
+    chunks = [decode_vault(decrypt(item, ident)) for item in split_pack(blob)]
+    parts = [c.strip("\n") for c in chunks if c.strip()]
+    return "\n\n".join(parts) + ("\n" if parts else "")
 
 
 def warn_url(url: str) -> None:
@@ -301,32 +291,27 @@ def cmd_init(_args: argparse.Namespace) -> int:
 
 def cmd_invite(args: argparse.Namespace) -> int:
     to = args.to or recipient_from_identity(identity_path())
-    print(build_url(to=to, name=args.name))
+    print(build_url(to=to))
     return 0
 
 
 def cmd_seal(args: argparse.Namespace) -> int:
     require_tools(need_zstd=True)
     existing = b""
-    names: list[str] = []
     if args.url:
         parsed = parse_url(args.url)
         to = parsed["to"]
-        names = name_list(parsed.get("n"))
         if parsed.get("c"):
             existing = b64url_decode(parsed["c"])
     else:
         to = args.to or recipient_from_identity(identity_path())
-    name = args.name or ""
     plaintext = sys.stdin.buffer.read()
     if not plaintext:
         die("stdin is empty")
     text = plaintext.decode("utf-8", "surrogateescape")
-    cipher = encrypt(encode_secrets([{"n": name, "v": text}]), to)
+    cipher = encrypt(encode_vault(text), to)
     items = split_pack(existing) + [cipher] if existing else [cipher]
-    if name:
-        names.append(name)
-    url = build_url(to=to, name=join_names(names), ciphertext=join_pack(items))
+    url = build_url(to=to, ciphertext=join_pack(items))
     warn_url(url)
     print(url)
     return 0
@@ -336,12 +321,11 @@ def cmd_open(args: argparse.Namespace) -> int:
     require_tools(need_zstd=True)
     parsed = parse_url(args.url)
     if "c" not in parsed:
-        die("url has no ciphertext (c=). This is an invite. Seal a secret first.")
+        die("url has no ciphertext (c=). This is an invite. Seal a vault first.")
     ident = identity_path()
     if not ident.is_file():
         die(f"no identity at {ident}. Run: inbox init")
-    secrets = open_all(b64url_decode(parsed["c"]), ident)
-    sys.stdout.buffer.write(format_secrets(secrets))
+    sys.stdout.write(open_all(b64url_decode(parsed["c"]), ident))
     return 0
 
 
@@ -353,13 +337,11 @@ def cmd_compact(args: argparse.Namespace) -> int:
     ident = identity_path()
     if not ident.is_file():
         die(f"no identity at {ident}. Run: inbox init")
-    secrets = open_all(b64url_decode(parsed["c"]), ident)
+    vault = open_all(b64url_decode(parsed["c"]), ident)
     to = parsed["to"]
-    blob = encrypt(encode_secrets(secrets), to)
-    names = [s["n"] for s in secrets if s["n"]]
-    url = build_url(to=to, name=join_names(names), ciphertext=blob)
-    before = len(args.url)
-    print(f"inbox: {len(secrets)} secrets, {before} → {len(url)} chars", file=sys.stderr)
+    blob = encrypt(encode_vault(vault), to)
+    url = build_url(to=to, ciphertext=blob)
+    print(f"inbox: {len(parsed['c'])} → {len(url)} chars", file=sys.stderr)
     warn_url(url)
     print(url)
     return 0
@@ -376,18 +358,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="generate a local age identity")
 
     inv = sub.add_parser("invite", help="print a write-only URL that carries your public key")
-    inv.add_argument("--name", help="optional inbox label")
     inv.add_argument("--to", help="recipient; default is the local identity")
 
-    s = sub.add_parser("seal", help="encrypt stdin and print a URL (appends if --url already has c=)")
+    s = sub.add_parser("seal", help="encrypt a vault from stdin and print a URL")
     s.add_argument("--url", help="invite or existing inbox URL (uses its to=, appends c=)")
     s.add_argument("--to", help="recipient if you are not passing --url")
-    s.add_argument("--name", "-n")
 
     o = sub.add_parser("open", help="decrypt a URL to stdout")
     o.add_argument("url")
 
-    c = sub.add_parser("compact", help="merge every secret into one zstd age file")
+    c = sub.add_parser("compact", help="merge packed vaults into one zstd age file")
     c.add_argument("url")
 
     t = sub.add_parser("to", help="print the public key from a URL")

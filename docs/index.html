@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>age inbox</title>
-  <meta name="description" content="Client-side age secret inbox. zstd then age. The URL is the secret. Nothing is uploaded.">
+  <meta name="description" content="Client-side age vault. Encrypt a .env. The URL is the ciphertext. Nothing is uploaded.">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>✉</text></svg>">
   <style>
     :root {
@@ -31,6 +31,7 @@
     }
     textarea { min-height: 6rem; resize: vertical; }
     textarea.secret { min-height: 4.5rem; }
+    textarea.vault { min-height: 10rem; }
     button, .btn {
       appearance: none; border: 0; background: var(--accent); color: #14180f; font: inherit; font-weight: 600;
       padding: 0.55rem 0.85rem; border-radius: 8px; cursor: pointer; margin: 0.85rem 0.4rem 0 0;
@@ -50,15 +51,12 @@
     footer { color: var(--muted); font-size: 0.8rem; margin-top: 1.5rem; }
     footer a { color: var(--accent); }
     .hidden { display: none; }
-    .secret-card { margin-top: 0.75rem; padding: 0.7rem 0.8rem; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
-    .secret-card h3 { margin: 0 0 0.4rem; font-size: 0.85rem; color: var(--accent); font-weight: 600; }
-    .secret-card pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 0.8rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
   </style>
 </head>
 <body>
   <main>
     <h1>age inbox</h1>
-    <p class="lead">The URL is the secret. Each secret is zstd-compressed, then age-encrypted. Ciphertext lives in the hash, so the host never sees it. Seal again to append another secret — writers do not need the private key.</p>
+    <p class="lead">The vault is the secret: a <code>.env</code> or any text. Names stay inside it, so they get encrypted too. The URL is only <code>to=</code> and ciphertext.</p>
 
     <section id="create">
       <h2>Your key</h2>
@@ -73,17 +71,15 @@
       <div class="row">
         <button type="button" class="ghost" id="mk-invite" disabled>Copy invite link</button>
       </div>
-      <p class="note warn">Opening a secret in the browser means this page sees your private key. It stays in memory in this tab. Prefer the CLI for open if that bothers you.</p>
+      <p class="note warn">Opening a vault in the browser means this page sees your private key. It stays in memory in this tab. Prefer the CLI for open if that bothers you.</p>
     </section>
 
     <section id="seal">
-      <h2>Seal a secret</h2>
+      <h2>Seal a vault</h2>
       <label for="to">Recipient (age1…)</label>
       <input id="to" spellcheck="false" placeholder="age1…">
-      <label for="name">Name (optional)</label>
-      <input id="name" placeholder="STRIPE">
-      <label for="plain">Secret</label>
-      <textarea id="plain" autocomplete="off" spellcheck="false"></textarea>
+      <label for="plain">Vault (.env)</label>
+      <textarea id="plain" class="vault" autocomplete="off" spellcheck="false" placeholder="OP_SERVICE_ACCOUNT_TOKEN=ops_…&#10;STRIPE_SECRET_KEY=sk_live_…"></textarea>
       <div class="row">
         <button type="button" id="do-seal">Seal</button>
         <button type="button" class="ghost" id="copy-url" disabled>Copy URL</button>
@@ -101,14 +97,14 @@
       <div class="row">
         <button type="button" id="do-open">Open</button>
         <button type="button" class="ghost" id="do-compact" disabled>Compact</button>
-        <button type="button" class="ghost" id="copy-secret" disabled>Copy plaintext</button>
+        <button type="button" class="ghost" id="copy-secret" disabled>Copy vault</button>
       </div>
       <p class="note" id="open-note"></p>
-      <div id="opened"></div>
+      <pre class="out hidden" id="opened"></pre>
     </section>
 
     <footer>
-      Secrets are zstd-compressed, then age-encrypted. Ciphertext lives in the URL hash; seal again to append.
+      The whole vault is zstd-compressed, then age-encrypted. Ciphertext lives in the URL hash; seal again to append.
       Interoperable with <code>age</code>, <code>zstd</code>, and the <code>inbox</code> CLI.
       Crypto is <a href="https://github.com/FiloSottile/typage">age-encryption 0.3.0</a> and
       <a href="https://github.com/bokuweb/zstd-wasm">zstd-wasm 0.0.27</a>, both vendored next to this page.
@@ -170,7 +166,7 @@
         }
       }
       const qs = new URLSearchParams(query);
-      for (const key of ["to", "n", "c", "v"]) {
+      for (const key of ["to", "c"]) {
         const val = qs.get(key);
         if (val) out[key] = val;
       }
@@ -179,19 +175,11 @@
     function buildHref(params) {
       const qs = new URLSearchParams();
       if (params.to) qs.set("to", params.to);
-      if (params.n) qs.set("n", params.n);
       if (params.c) qs.set("c", params.c);
       const loc = new URL(location.href);
       loc.hash = qs.toString();
       loc.search = "";
       return loc.href;
-    }
-    function nameList(text) {
-      if (!text) return [];
-      return text.split(",").map((s) => s.trim()).filter(Boolean);
-    }
-    function joinNames(names) {
-      return names.length ? names.join(",") : undefined;
     }
     function splitPack(blob) {
       if (startsWith(blob, PACK_MAGIC)) {
@@ -199,14 +187,14 @@
         const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
         let off = 4;
         while (off < blob.length) {
-          if (off + 4 > blob.length) throw new Error("truncated pack");
+          if (off + 4 > blob.length) throw new Error("404");
           const n = view.getUint32(off);
           off += 4;
-          if (off + n > blob.length) throw new Error("truncated pack frame");
+          if (off + n > blob.length) throw new Error("404");
           items.push(blob.subarray(off, off + n));
           off += n;
         }
-        if (!items.length) throw new Error("empty pack");
+        if (!items.length) throw new Error("404");
         return items;
       }
       return [blob];
@@ -227,25 +215,34 @@
       }
       return out;
     }
-    function encodeSecrets(secrets) {
-      const json = JSON.stringify({ secrets });
-      return zstdCompress(enc.encode(json), 19);
+    function encodeVault(text) {
+      return zstdCompress(enc.encode(text), 19);
     }
-    function decodePlain(plain) {
+    function secretsToEnv(secrets) {
+      return secrets.map((s) => s.n ? `${s.n}=${s.v}` : s.v).join("\n");
+    }
+    function decodeVault(plain) {
       try {
         if (!startsWith(plain, ZSTD_MAGIC)) throw new Error("404");
-        const data = zstdDecompress(plain);
-        const obj = JSON.parse(dec.decode(data));
-        if (!obj || !Array.isArray(obj.secrets)) throw new Error("404");
-        const out = [];
-        for (const item of obj.secrets) {
-          if (item && typeof item === "object") out.push({ n: String(item.n || ""), v: String(item.v || "") });
-        }
-        if (!out.length) throw new Error("404");
-        return out;
+        const text = dec.decode(zstdDecompress(plain));
+        try {
+          const obj = JSON.parse(text);
+          if (obj && Array.isArray(obj.secrets)) {
+            const out = [];
+            for (const item of obj.secrets) {
+              if (item && typeof item === "object") out.push({ n: String(item.n || ""), v: String(item.v || "") });
+            }
+            if (out.length) return secretsToEnv(out);
+          }
+        } catch {}
+        return text;
       } catch {
         throw new Error("404 Not Found");
       }
+    }
+    function joinVaults(chunks) {
+      const parts = chunks.map((c) => c.replace(/\n+$/, "")).filter((c) => c.length);
+      return parts.join("\n\n") + (parts.length ? "\n" : "");
     }
     async function encryptBytes(plain, recipient) {
       const e = new age.Encrypter();
@@ -258,12 +255,11 @@
       return await d.decrypt(cipher);
     }
     async function openAll(blob, identity) {
-      const secrets = [];
+      const chunks = [];
       for (const item of splitPack(blob)) {
-        const plain = await decryptBytes(item, identity);
-        secrets.push(...await decodePlain(plain));
+        chunks.push(decodeVault(await decryptBytes(item, identity)));
       }
-      return secrets;
+      return joinVaults(chunks);
     }
     function identityLine(text) {
       const line = (text || "").split(/\r?\n/).map((l) => l.trim()).find((l) => l.startsWith("AGE-SECRET-KEY-"));
@@ -285,23 +281,9 @@
         : `URL is ${n} chars.`;
       $("url-len").className = n > 2000 ? "note warn" : "note";
     }
-    function renderSecrets(secrets) {
-      $("opened").innerHTML = "";
-      secrets.forEach((item, i) => {
-        const card = document.createElement("div");
-        card.className = "secret-card";
-        const h = document.createElement("h3");
-        h.textContent = item.n || `secret ${i + 1}`;
-        const pre = document.createElement("pre");
-        pre.textContent = item.v;
-        card.append(h, pre);
-        $("opened").appendChild(card);
-      });
-    }
 
     let lastPlain = "";
     let lastHref = "";
-    let lastSecrets = [];
 
     async function refreshPub() {
       const id = identityLine($("identity").value);
@@ -344,7 +326,7 @@
     $("mk-invite").onclick = async () => {
       const id = identityLine($("identity").value);
       const rec = await recipientFromIdentity(id);
-      const href = buildHref({ to: rec, n: $("name").value.trim() || undefined });
+      const href = buildHref({ to: rec });
       await navigator.clipboard.writeText(href);
       $("mk-invite").textContent = "Copied invite";
       setTimeout(() => { $("mk-invite").textContent = "Copy invite link"; }, 1500);
@@ -358,31 +340,27 @@
       $("sealed").classList.add("hidden");
       $("copy-url").disabled = true;
       const to = $("to").value.trim();
-      const plain = $("plain").value;
-      const name = $("name").value.trim();
+      const vault = $("plain").value;
       if (!to.startsWith("age1")) {
         $("seal-note").textContent = "Recipient must be an age1… public key.";
         $("seal-note").className = "note bad";
         return;
       }
-      if (!plain) {
-        $("seal-note").textContent = "Secret is empty.";
+      if (!vault.trim()) {
+        $("seal-note").textContent = "Vault is empty.";
         $("seal-note").className = "note bad";
         return;
       }
       try {
         const existing = currentParams();
-        const cipher = await encryptBytes(encodeSecrets([{ n: name, v: plain }]), to);
+        const cipher = await encryptBytes(encodeVault(vault), to);
         let blob = cipher;
-        let names = name ? [name] : [];
         let appended = false;
         if (existing.c && existing.to === to) {
-          const items = splitPack(b64urlDecode(existing.c));
-          blob = joinPack([...items, cipher]);
-          names = [...nameList(existing.n), ...names];
+          blob = joinPack([...splitPack(b64urlDecode(existing.c)), cipher]);
           appended = true;
         }
-        const href = buildHref({ to, n: joinNames(names), c: b64urlEncode(blob) });
+        const href = buildHref({ to, c: b64urlEncode(blob) });
         lastHref = href;
         history.replaceState(null, "", href);
         $("url").value = href;
@@ -394,8 +372,8 @@
           ? ` URL is ${href.length} chars; some chats will truncate it.`
           : ` URL is ${href.length} chars.`;
         $("seal-note").textContent = (appended
-          ? "Appended. Share the URL. Seal again to add another secret."
-          : "Sealed. Share the URL. Seal again to append another secret.") + warn;
+          ? "Appended. Share the URL. Seal again to add another vault chunk."
+          : "Sealed. The URL has no names in it. Seal again to append.") + warn;
         $("seal-note").className = href.length > 2000 ? "note warn" : "note ok";
       } catch (err) {
         $("seal-note").textContent = String(err.message || err);
@@ -412,10 +390,10 @@
 
     async function doOpen() {
       $("open-note").textContent = "";
-      $("opened").innerHTML = "";
+      $("opened").classList.add("hidden");
+      $("opened").textContent = "";
       $("copy-secret").disabled = true;
       lastPlain = "";
-      lastSecrets = [];
       const params = parseParams($("url").value || location.hash);
       if (!params.to || !params.to.startsWith("age1")) {
         $("open-note").textContent = "URL needs to=age1…";
@@ -424,8 +402,7 @@
       }
       if (!params.c) {
         $("to").value = params.to;
-        if (params.n) $("name").value = params.n;
-        $("open-note").textContent = "That URL is an invite (no ciphertext). Seal a secret to it.";
+        $("open-note").textContent = "That URL is an invite. Paste a vault and seal it.";
         $("open-note").className = "note";
         return null;
       }
@@ -435,21 +412,16 @@
         $("open-note").className = "note bad";
         return null;
       }
-      const secrets = await openAll(b64urlDecode(params.c), id);
-      lastSecrets = secrets;
-      lastPlain = secrets.map((s, i) => {
-        const title = s.n || `secret ${i + 1}`;
-        return `=== ${title} ===\n${s.v}`;
-      }).join("\n\n");
-      renderSecrets(secrets);
+      const vault = await openAll(b64urlDecode(params.c), id);
+      lastPlain = vault;
+      $("opened").textContent = vault;
+      $("opened").classList.remove("hidden");
+      $("plain").value = vault;
       $("copy-secret").disabled = false;
-      const names = secrets.map((s) => s.n).filter(Boolean);
-      $("open-note").textContent = names.length
-        ? `Opened ${secrets.length} secret${secrets.length === 1 ? "" : "s"}: ${names.join(", ")}.`
-        : `Opened ${secrets.length} secret${secrets.length === 1 ? "" : "s"}.`;
+      $("open-note").textContent = "Opened.";
       $("open-note").className = "note ok";
       showUrlLen($("url").value || location.href);
-      return { params, secrets, id };
+      return { params, vault, id };
     }
 
     $("do-open").onclick = async () => {
@@ -464,10 +436,9 @@
       try {
         const opened = await doOpen();
         if (!opened) return;
-        const { params, secrets } = opened;
-        const blob = await encryptBytes(encodeSecrets(secrets), params.to);
-        const names = secrets.map((s) => s.n).filter(Boolean);
-        const href = buildHref({ to: params.to, n: joinNames(names), c: b64urlEncode(blob) });
+        const { params, vault } = opened;
+        const blob = await encryptBytes(encodeVault(vault), params.to);
+        const href = buildHref({ to: params.to, c: b64urlEncode(blob) });
         lastHref = href;
         history.replaceState(null, "", href);
         $("url").value = href;
@@ -475,8 +446,7 @@
         $("sealed").classList.remove("hidden");
         $("copy-url").disabled = false;
         showUrlLen(href);
-        const before = (params && $("url").value) ? "" : "";
-        $("open-note").textContent = `Compacted ${secrets.length} secrets into one zstd+age file. URL is ${href.length} chars.`;
+        $("open-note").textContent = `Compacted into one vault. URL is ${href.length} chars.`;
         $("open-note").className = href.length > 2000 ? "note warn" : "note ok";
       } catch {
         $("open-note").textContent = "404 Not Found";
@@ -488,19 +458,18 @@
       if (!lastPlain) return;
       await navigator.clipboard.writeText(lastPlain);
       $("copy-secret").textContent = "Copied";
-      setTimeout(() => { $("copy-secret").textContent = "Copy plaintext"; }, 1500);
+      setTimeout(() => { $("copy-secret").textContent = "Copy vault"; }, 1500);
     };
 
     (async () => {
       const fromHash = parseParams(location.hash);
       if (fromHash.to) $("to").value = fromHash.to;
-      if (fromHash.n && !fromHash.n.includes(",")) $("name").value = fromHash.n;
       if (fromHash.to || fromHash.c) $("url").value = location.href;
       showUrlLen(fromHash.c ? location.href : "");
       if (fromHash.c) {
-        $("open-note").textContent = "Sealed URL loaded. Paste the matching identity and hit Open. Compact rewrites the hash to a shorter URL.";
+        $("open-note").textContent = "Sealed URL loaded. Paste the matching identity and hit Open.";
       } else if (fromHash.to) {
-        $("open-note").textContent = "Invite loaded. Type a secret and seal it. Seal again later to append.";
+        $("open-note").textContent = "Invite loaded. Paste a vault and seal it.";
       }
     })();
   </script>
